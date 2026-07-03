@@ -1,0 +1,565 @@
+"""
+Unicorn Hunter - Main Streamlit Application
+Single-page UI with sequential agent pipeline flow.
+
+Bundle A: API key fix (I1/I2), previous stages expanders (I3/U1)
+Bundle B: Sidebar filter + sort (U2), idea date display (U2b), compare two ideas (U3)
+"""
+
+import os
+import re
+from datetime import datetime
+import streamlit as st
+
+from agents.discovery import run_discovery
+from agents.problem_framing import run_problem_framing
+from agents.solution_generator import run_solution_generation
+from agents.evaluation import run_initial_evaluation, run_reevaluation
+
+st.set_page_config(page_title="Unicorn Hunter", page_icon="🦄", layout="wide")
+
+# Storage selection: use Supabase if credentials exist, else fall back to SQLite
+def _load_storage():
+    """
+    Try Supabase first. If credentials are missing, fall back to local SQLite.
+    Returns (create_idea, update_idea, get_idea, list_ideas, init_db_or_none)
+    """
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_KEY")
+
+    # Also check secrets.toml directly
+    if not supabase_url or not supabase_key:
+        secrets_path = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
+        if os.path.exists(secrets_path):
+            try:
+                with open(secrets_path, encoding="utf-8-sig") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("SUPABASE_URL") and not supabase_url:
+                            supabase_url = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        elif line.startswith("SUPABASE_KEY") and not supabase_key:
+                            supabase_key = line.split("=", 1)[1].strip().strip('"').strip("'")
+            except Exception:
+                pass
+
+    if supabase_url and supabase_key:
+        from storage.supabase_db import (
+            create_idea, update_idea, get_idea, list_ideas
+        )
+        return create_idea, update_idea, get_idea, list_ideas, None, "supabase"
+    else:
+        from storage.db import init_db, create_idea, update_idea, get_idea, list_ideas
+        return create_idea, update_idea, get_idea, list_ideas, init_db, "sqlite"
+
+create_idea, update_idea, get_idea, list_ideas, _init_db, _storage_backend = _load_storage()
+if _init_db:
+    _init_db()
+
+# ---------- Session state init ----------
+defaults = {
+    "idea_id": None,
+    "stage": "input",
+    "selected_problem": "",
+    "compare_ids": [],
+    "view": "pipeline",  # pipeline | compare
+}
+for key, val in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+
+def reset_session():
+    st.session_state.idea_id = None
+    st.session_state.stage = "input"
+    st.session_state.selected_problem = ""
+    st.session_state.compare_ids = []
+    st.session_state.view = "pipeline"
+
+
+def format_date(iso_str: str) -> str:
+    """Convert ISO datetime string to readable date."""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        return dt.strftime("%d %b %Y, %H:%M")
+    except Exception:
+        return iso_str or "—"
+
+
+def extract_decision_and_score(report_text: str) -> tuple:
+    """
+    Extract decision (Build/Test/Park/Reject) and score (XX/50) from report text.
+    Returns (decision, score) or (None, None).
+    """
+    decision = None
+    score = None
+
+    decision_patterns = [
+        r"(?:Final\s+)?Decision[:\s*_]+\**(Build|Test|Park|Reject)\**",
+        r"\*\*(?:Final\s+)?Decision[:\s*_]+\**(Build|Test|Park|Reject)",
+        r"(?:Build|Test|Park|Reject)(?=\s*$|\s*\n)",
+    ]
+    for pattern in decision_patterns:
+        match = re.search(pattern, report_text, re.IGNORECASE | re.MULTILINE)
+        if match:
+            decision = match.group(1) if match.lastindex else match.group(0)
+            decision = decision.strip().capitalize()
+            break
+
+    score_patterns = [
+        r"(?:Final\s+)?(?:Overall\s+)?Score[^:]*:\s*\**(\d+)/50",
+        r"(\d+)\s*/\s*50",
+    ]
+    for pattern in score_patterns:
+        match = re.search(pattern, report_text, re.IGNORECASE)
+        if match:
+            score = int(match.group(1))
+            break
+
+    return decision, score
+
+
+def show_previous_stages(idea: dict, current_stage: str):
+    """
+    Display all completed previous stages as collapsed expanders.
+    Allows user to read any previous output without losing current stage.
+    """
+    stages_order = ["discovery", "problem", "solutions", "eval", "reeval", "done"]
+    current_index = stages_order.index(current_stage) if current_stage in stages_order else 0
+
+    if current_index == 0:
+        return
+
+    st.markdown("---")
+    st.caption("📂 Previous stages — click to expand and read")
+
+    if current_index > 0 and idea.get("discovery_output"):
+        with st.expander("Step 2 — Discovery Agent output", expanded=False):
+            st.markdown(idea["discovery_output"])
+
+    if current_index > 1 and idea.get("problem_card"):
+        with st.expander("Step 3 — Problem Card", expanded=False):
+            st.markdown(idea["problem_card"])
+
+    if current_index > 2 and idea.get("solutions_output"):
+        with st.expander("Step 4 — Solution Options", expanded=False):
+            st.markdown(idea["solutions_output"])
+
+    if current_index > 3 and idea.get("initial_evaluation"):
+        with st.expander("Step 5 — Initial Evaluation Report", expanded=False):
+            st.markdown(idea["initial_evaluation"])
+        if idea.get("user_answers"):
+            with st.expander("Step 5 — Your Field Verification Answers", expanded=False):
+                st.markdown(idea["user_answers"])
+
+    if current_index > 4 and idea.get("final_evaluation"):
+        with st.expander("Step 6 — Re-evaluation After Field Verification", expanded=False):
+            st.markdown(idea["final_evaluation"])
+
+    st.markdown("---")
+
+
+def decision_badge(decision: str) -> str:
+    icons = {"Build": "🟢", "Test": "🟡", "Park": "🔵", "Reject": "🔴"}
+    return icons.get(decision, "⚪")
+
+
+# ---------- Sidebar ----------
+with st.sidebar:
+    st.header("🦄 Unicorn Hunter")
+    storage_icon = "☁️ Supabase" if _storage_backend == "supabase" else "💾 Local SQLite"
+    st.caption(f"Idea Generator & Validator · {storage_icon}")
+
+    if st.button("➕ New Idea", use_container_width=True):
+        reset_session()
+        st.rerun()
+
+    st.divider()
+
+    # --- Filter & Sort controls ---
+    all_ideas = list_ideas()
+
+    filter_decision = st.selectbox(
+        "Filter by decision",
+        ["All", "Build", "Test", "Park", "Reject", "In Progress"],
+        index=0,
+    )
+
+    sort_by = st.selectbox(
+        "Sort by",
+        ["Newest first", "Oldest first", "Highest score", "Lowest score"],
+        index=0,
+    )
+
+    # Apply filter
+    if filter_decision == "In Progress":
+        filtered = [r for r in all_ideas if r.get("status") != "completed"]
+    elif filter_decision != "All":
+        filtered = [r for r in all_ideas if (r.get("decision") or "").lower() == filter_decision.lower()]
+    else:
+        filtered = all_ideas
+
+    # Apply sort
+    def sort_key(r):
+        if "score" in sort_by.lower():
+            s = r.get("final_score") or r.get("initial_score") or 0
+            return s if "highest" in sort_by.lower() else -s
+        return r["id"] if "oldest" in sort_by.lower() else -r["id"]
+
+    filtered = sorted(filtered, key=sort_key)
+
+    st.caption(f"Showing {len(filtered)} of {len(all_ideas)} ideas")
+    st.divider()
+
+    # --- Compare mode toggle ---
+    compare_mode = st.toggle("Select ideas to compare", value=False)
+
+    if compare_mode and len(st.session_state.compare_ids) == 2:
+        if st.button("🔍 Compare Selected Ideas", type="primary", use_container_width=True):
+            st.session_state.view = "compare"
+            st.rerun()
+    elif compare_mode:
+        remaining = 2 - len(st.session_state.compare_ids)
+        st.caption(f"Select {remaining} more idea(s) to compare")
+
+    st.subheader("Idea History")
+
+    for row in filtered:
+        idea_id = row["id"]
+        label = f"#{idea_id} — {row['sector_or_idea'][:30]}"
+        decision = row.get("decision") or "—"
+        score = row.get("final_score") or row.get("initial_score") or "—"
+        status = row.get("status") or "in progress"
+        date_str = format_date(row.get("created_at", ""))
+
+        if status == "completed":
+            score_str = f"{score}/50" if score != "—" else "—"
+            badge = f"{decision_badge(decision)} {decision} | {score_str}"
+        else:
+            badge = "🔄 in progress"
+
+        if compare_mode:
+            is_checked = idea_id in st.session_state.compare_ids
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                checked = st.checkbox("", value=is_checked, key=f"cmp_{idea_id}")
+                if checked and idea_id not in st.session_state.compare_ids:
+                    if len(st.session_state.compare_ids) < 2:
+                        st.session_state.compare_ids.append(idea_id)
+                        st.rerun()
+                elif not checked and idea_id in st.session_state.compare_ids:
+                    st.session_state.compare_ids.remove(idea_id)
+                    st.rerun()
+            with col2:
+                st.caption(f"{label}\n{badge}\n📅 {date_str}")
+        else:
+            if st.button(
+                f"{label}\n{badge}\n📅 {date_str}",
+                key=f"hist_{idea_id}",
+                use_container_width=True,
+            ):
+                st.session_state.compare_ids = []
+                st.session_state.view = "pipeline"
+                st.session_state.idea_id = idea_id
+                idea = get_idea(idea_id)
+                if idea.get("final_evaluation"):
+                    st.session_state.stage = "done"
+                elif idea.get("initial_evaluation"):
+                    st.session_state.stage = "reeval"
+                elif idea.get("solutions_output"):
+                    st.session_state.stage = "eval"
+                elif idea.get("problem_card"):
+                    st.session_state.stage = "solutions"
+                elif idea.get("discovery_output"):
+                    st.session_state.stage = "problem"
+                else:
+                    st.session_state.stage = "discovery"
+                st.rerun()
+
+# ============================================================
+# COMPARE VIEW
+# ============================================================
+if st.session_state.view == "compare":
+    ids = st.session_state.compare_ids
+    if len(ids) != 2:
+        st.warning("Please select exactly 2 ideas to compare.")
+        if st.button("← Back"):
+            st.session_state.view = "pipeline"
+            st.rerun()
+    else:
+        idea_a = get_idea(ids[0])
+        idea_b = get_idea(ids[1])
+
+        st.title("🔍 Idea Comparison")
+
+        if st.button("← Back to Pipeline"):
+            st.session_state.view = "pipeline"
+            st.session_state.compare_ids = []
+            st.rerun()
+
+        # Summary metrics side by side
+        col_a, col_b = st.columns(2)
+
+        def render_idea_summary(col, idea):
+            with col:
+                decision = idea.get("decision") or "—"
+                score = idea.get("final_score") or idea.get("initial_score") or "—"
+                date_str = format_date(idea.get("created_at", ""))
+                st.subheader(f"#{idea['id']} — {idea['sector_or_idea'][:50]}")
+                st.caption(f"📅 Created: {date_str}")
+                m1, m2 = st.columns(2)
+                with m1:
+                    st.metric("Decision", f"{decision_badge(decision)} {decision}")
+                with m2:
+                    st.metric("Score", f"{score}/50" if score != "—" else "—")
+
+        render_idea_summary(col_a, idea_a)
+        render_idea_summary(col_b, idea_b)
+
+        st.divider()
+
+        # Side-by-side full reports
+        sections = [
+            ("Discovery Output", "discovery_output"),
+            ("Problem Card", "problem_card"),
+            ("Solutions", "solutions_output"),
+            ("Initial Evaluation", "initial_evaluation"),
+            ("Field Answers", "user_answers"),
+            ("Final Evaluation", "final_evaluation"),
+        ]
+
+        for section_title, field in sections:
+            content_a = idea_a.get(field)
+            content_b = idea_b.get(field)
+            if content_a or content_b:
+                with st.expander(f"📄 {section_title}", expanded=False):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.caption(f"Idea #{idea_a['id']}")
+                        st.markdown(content_a or "— Not available —")
+                    with c2:
+                        st.caption(f"Idea #{idea_b['id']}")
+                        st.markdown(content_b or "— Not available —")
+
+# ============================================================
+# PIPELINE VIEW
+# ============================================================
+else:
+    st.title("🦄 Unicorn Hunter")
+    st.caption("Internal multi-agent system for generating and validating digital & AI startup ideas")
+
+    # ---------- Stage 1: Input ----------
+    if st.session_state.stage == "input":
+        st.subheader("Step 1 — Start a New Idea")
+
+        sector_or_idea = st.text_area(
+            "Idea or sector to explore",
+            placeholder="Example: I want to explore problems in small coffee shops that can be solved with a digital product",
+            height=100,
+        )
+        user_sources = st.text_area(
+            "Your own context or sources (optional)",
+            placeholder="Any notes, links, or text you already have — the system will complete with web search",
+            height=100,
+        )
+
+        if st.button("🚀 Start Analysis", type="primary", disabled=not sector_or_idea.strip()):
+            idea_id = create_idea(sector_or_idea, user_sources)
+            st.session_state.idea_id = idea_id
+            st.session_state.stage = "discovery"
+            st.rerun()
+
+    # ---------- Stage 2: Discovery ----------
+    elif st.session_state.stage == "discovery":
+        idea = get_idea(st.session_state.idea_id)
+        st.subheader("Step 2 — Discovery Agent (searching the web)")
+        st.caption(f"📅 Created: {format_date(idea.get('created_at', ''))}")
+
+        if not idea.get("discovery_output"):
+            with st.spinner("Searching the web and extracting opportunities..."):
+                output = run_discovery(idea["sector_or_idea"], idea["user_sources"] or "")
+                update_idea(idea["id"], discovery_output=output)
+            st.rerun()
+        else:
+            st.markdown(idea["discovery_output"])
+            st.divider()
+            st.info("Copy the problem you want to continue with into the field below.")
+            selected_problem = st.text_area("Selected problem to investigate", height=120)
+            if st.button("➡️ Continue to Problem Framing", disabled=not selected_problem.strip()):
+                st.session_state.selected_problem = selected_problem
+                st.session_state.stage = "problem"
+                st.rerun()
+
+    # ---------- Stage 3: Problem Framing ----------
+    elif st.session_state.stage == "problem":
+        idea = get_idea(st.session_state.idea_id)
+        st.subheader("Step 3 — Problem Framing Agent")
+        st.caption(f"📅 Created: {format_date(idea.get('created_at', ''))}")
+        show_previous_stages(idea, "problem")
+
+        if st.button("🔍 Generate Problem Card"):
+            with st.spinner("Analyzing the problem..."):
+                output = run_problem_framing(
+                    st.session_state.selected_problem, idea["sector_or_idea"]
+                )
+                update_idea(idea["id"], problem_card=output)
+            st.rerun()
+
+        idea = get_idea(st.session_state.idea_id)
+        if idea.get("problem_card"):
+            st.markdown(idea["problem_card"])
+            st.divider()
+            if st.button("➡️ Continue to Solution Generation", type="primary"):
+                st.session_state.stage = "solutions"
+                st.rerun()
+
+    # ---------- Stage 4: Solution Generation ----------
+    elif st.session_state.stage == "solutions":
+        idea = get_idea(st.session_state.idea_id)
+        st.subheader("Step 4 — Solution Generator Agent")
+        st.caption(f"📅 Created: {format_date(idea.get('created_at', ''))}")
+        show_previous_stages(idea, "solutions")
+
+        if not idea.get("solutions_output"):
+            with st.spinner("Generating diverse solutions..."):
+                output = run_solution_generation(idea["problem_card"])
+                update_idea(idea["id"], solutions_output=output)
+            st.rerun()
+        else:
+            st.markdown(idea["solutions_output"])
+            st.divider()
+            if st.button("➡️ Continue to Initial Evaluation", type="primary"):
+                st.session_state.stage = "eval"
+                st.rerun()
+
+    # ---------- Stage 5: Initial Evaluation ----------
+    elif st.session_state.stage == "eval":
+        idea = get_idea(st.session_state.idea_id)
+        st.subheader("Step 5 — Evaluation Agent (Initial Report)")
+        st.caption(f"📅 Created: {format_date(idea.get('created_at', ''))}")
+        show_previous_stages(idea, "eval")
+
+        if not idea.get("initial_evaluation"):
+            with st.spinner("Evaluating solutions and generating verification questions..."):
+                output = run_initial_evaluation(idea["problem_card"], idea["solutions_output"])
+                decision, score = extract_decision_and_score(output)
+                update_idea(idea["id"], initial_evaluation=output, initial_score=score)
+            st.rerun()
+        else:
+            st.warning("⚠️ This is an analytical report based on model inference — NOT actual market validation.")
+            st.markdown(idea["initial_evaluation"])
+            st.divider()
+            st.subheader("Field Verification Answers")
+            st.caption("Go verify in the field, then enter what you found.")
+            answers = st.text_area("Your answers", height=150, key="user_answers_input")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Submit Answers & Re-evaluate", type="primary",
+                             disabled=not answers.strip()):
+                    update_idea(idea["id"], user_answers=answers)
+                    st.session_state.stage = "reeval"
+                    st.rerun()
+            with col2:
+                if st.button("⏭️ Skip Verification — Keep Initial Report Only"):
+                    idea = get_idea(st.session_state.idea_id)
+                    decision, score = extract_decision_and_score(idea["initial_evaluation"])
+                    update_idea(idea["id"], status="completed", decision=decision, final_score=score)
+                    st.session_state.stage = "done"
+                    st.rerun()
+
+    # ---------- Stage 6: Re-evaluation ----------
+    elif st.session_state.stage == "reeval":
+        idea = get_idea(st.session_state.idea_id)
+        st.subheader("Step 6 — Re-evaluation After Field Verification")
+        st.caption(f"📅 Created: {format_date(idea.get('created_at', ''))}")
+        show_previous_stages(idea, "reeval")
+
+        if not idea.get("final_evaluation"):
+            with st.spinner("Updating evaluation based on your answers..."):
+                output = run_reevaluation(
+                    idea["initial_evaluation"],
+                    "See the 'Field Verification Questions' section in the initial report above.",
+                    idea["user_answers"],
+                )
+                decision, score = extract_decision_and_score(output)
+                update_idea(idea["id"], final_evaluation=output, final_score=score,
+                            decision=decision, status="completed")
+            st.rerun()
+        else:
+            st.markdown(idea["final_evaluation"])
+            st.divider()
+            if st.button("➡️ View Full Final Report", type="primary"):
+                st.session_state.stage = "done"
+                st.rerun()
+
+    # ---------- Stage 7: Final Report ----------
+    elif st.session_state.stage == "done":
+        idea = get_idea(st.session_state.idea_id)
+        st.subheader("✅ Final Report")
+        st.caption(f"📅 Created: {format_date(idea.get('created_at', ''))}")
+
+        decision = idea.get("decision") or "—"
+        score = idea.get("final_score") or idea.get("initial_score") or "—"
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Decision", f"{decision_badge(decision)} {decision}")
+        with col2:
+            st.metric("Score", f"{score}/50" if score != "—" else "—")
+
+        st.divider()
+        show_previous_stages(idea, "done")
+
+        final_text = idea.get("final_evaluation") or idea.get("initial_evaluation")
+        st.markdown(final_text)
+
+        md_content = f"""# MVP Opportunity Report — Unicorn Hunter
+
+**Idea ID:** {idea['id']}
+**Created:** {format_date(idea.get('created_at', ''))}
+**Original Input:** {idea['sector_or_idea']}
+**Decision:** {decision}
+**Final Score:** {score}/50
+
+---
+
+## Discovery Agent Output
+{idea.get('discovery_output', '—')}
+
+---
+
+## Problem Card
+{idea.get('problem_card', '—')}
+
+---
+
+## Proposed Solutions
+{idea.get('solutions_output', '—')}
+
+---
+
+## Initial Evaluation (Analytical)
+{idea.get('initial_evaluation', '—')}
+
+---
+
+## Field Verification Answers
+{idea.get('user_answers', '—')}
+
+---
+
+## Final Evaluation (After Field Verification)
+{idea.get('final_evaluation', 'Field verification was not completed for this idea.')}
+"""
+
+        st.download_button(
+            "⬇️ Download Full Report as Markdown",
+            data=md_content,
+            file_name=f"unicorn_hunter_idea_{idea['id']}.md",
+            mime="text/markdown",
+            type="primary",
+        )
+
+        if st.button("➕ Start New Idea"):
+            reset_session()
+            st.rerun()
