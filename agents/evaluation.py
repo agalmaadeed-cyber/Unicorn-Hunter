@@ -142,3 +142,109 @@ User's Actual Answers After Field Verification:
 {user_answers}
 """
     return call_agent(REEVALUATION_SYSTEM_PROMPT, user_message)
+
+
+ADDITIONAL_ROUND_SYSTEM_PROMPT = """You are the same evaluation agent continuing a multi-round field verification process.
+
+You have the full history of all previous evaluation rounds and the user's new answers.
+
+Your job:
+1. Review all previous rounds to understand what has already been verified and what questions were already asked.
+2. Generate 3 NEW verification questions — do NOT repeat questions already asked in previous rounds.
+   Base the new questions on the criteria that are still weakest or most uncertain after all previous rounds.
+3. Recalculate ONLY the criteria affected by the new answers provided.
+
+FORMATTING RULES — STRICTLY ENFORCED:
+- Every field value must be on the same line as its label
+- Do NOT use nested bullet points inside field values — write as plain prose
+- Monetary values: write as plain text e.g. "$9-15/month"
+- Do NOT use asterisks (*) inside field values — bold labels only
+- The score must be written as a plain fraction e.g. "41/50"
+- Do NOT add any section outside this exact format except Agent Notes
+
+---
+
+## MVP Opportunity Report — Verification Round [ROUND_NUMBER]
+
+**Idea Name:** [name here]
+**Sector:** [sector here]
+**Target Customer:** [one sentence]
+**Problem:** [one sentence]
+**Current User Situation:** [one sentence]
+**Proposed Solution:** [one to two sentences]
+**MVP Shape:** [one to two sentences]
+**Market Testing Method:** [one to two sentences]
+**Revenue Model:** [plain text]
+**Why Would the Customer Pay?** [one to two sentences]
+**Risks:** [comma-separated list as plain text]
+
+**What Changed in This Round:**
+[For each changed criterion write: "Criterion name: X/5 → Y/5 — reason in one sentence."]
+
+**Cumulative Score After Round [ROUND_NUMBER]:** XX/50
+**Current Decision:** Build / Test / Park / Reject
+
+---
+
+## New Field Verification Questions (Round [ROUND_NUMBER + 1])
+
+Provide EXACTLY 3 questions NOT already asked in previous rounds.
+Number them plainly: 1. 2. 3.
+Each question must be specific and answerable in one sentence.
+
+---
+
+After the questions, you may add:
+
+## Agent Notes
+(Optional — any additional insight goes here only)
+
+Be honest and strict: if the answers do not support the idea, lower the score. Do not sugarcoat."""
+
+
+def run_additional_round(
+    initial_report: str,
+    rounds_history: list,
+    new_answers: str,
+    round_number: int,
+) -> str:
+    """
+    Run an additional verification round beyond the first re-evaluation.
+
+    Args:
+        initial_report: The original analytical report from Agent 4
+        rounds_history: List of dicts [{"questions": str, "answers": str, "report": str}, ...]
+        new_answers: User's answers for the current round
+        round_number: Current round number (2, 3, 4, ...)
+    """
+    history_text = ""
+    for i, round_data in enumerate(rounds_history, start=1):
+        history_text += f"""
+--- Round {i} Questions ---
+{round_data.get('questions', '—')}
+
+--- Round {i} User Answers ---
+{round_data.get('answers', '—')}
+
+--- Round {i} Report ---
+{round_data.get('report', '—')}
+"""
+
+    prompt = ADDITIONAL_ROUND_SYSTEM_PROMPT.replace(
+        "[ROUND_NUMBER]", str(round_number)
+    ).replace(
+        "[ROUND_NUMBER + 1]", str(round_number + 1)
+    )
+
+    user_message = f"""Initial Analytical Report:
+{initial_report}
+
+Full Verification History (all previous rounds):
+{history_text}
+
+User's New Answers for Round {round_number}:
+{new_answers}
+
+This is round {round_number}. Generate updated report and new questions for round {round_number + 1}.
+"""
+    return call_agent(prompt, user_message)

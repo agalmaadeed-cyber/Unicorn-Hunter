@@ -14,7 +14,7 @@ import streamlit as st
 from agents.discovery import run_discovery
 from agents.problem_framing import run_problem_framing
 from agents.solution_generator import run_solution_generation
-from agents.evaluation import run_initial_evaluation, run_reevaluation
+from agents.evaluation import run_initial_evaluation, run_reevaluation, run_additional_round
 
 st.set_page_config(page_title="Unicorn Hunter", page_icon="🦄", layout="wide")
 
@@ -467,13 +467,35 @@ else:
                     st.session_state.stage = "done"
                     st.rerun()
 
-    # ---------- Stage 6: Re-evaluation ----------
+    # ---------- Stage 6: Re-evaluation (multi-round) ----------
     elif st.session_state.stage == "reeval":
+        import json as _json
+
         idea = get_idea(st.session_state.idea_id)
-        st.subheader("Step 6 — Re-evaluation After Field Verification")
+
+        # Load verification rounds history
+        rounds_history = []
+        if idea.get("verification_rounds"):
+            try:
+                rounds_history = _json.loads(idea["verification_rounds"])
+            except Exception:
+                rounds_history = []
+
+        current_round = len(rounds_history) + 1
+        st.subheader(f"Step 6 — Field Verification Round {current_round}")
         st.caption(f"📅 Created: {format_date(idea.get('created_at', ''))}")
         show_previous_stages(idea, "reeval")
 
+        # Show all previous rounds as expanders
+        if rounds_history:
+            st.caption(f"📋 {len(rounds_history)} previous round(s) completed")
+            for i, r in enumerate(rounds_history, start=1):
+                with st.expander(f"Round {i} — Report & Answers", expanded=False):
+                    st.markdown(f"**Your Answers:**\n{r.get('answers', '—')}")
+                    st.divider()
+                    st.markdown(r.get("report", "—"))
+
+        # Run first re-evaluation if not done yet
         if not idea.get("final_evaluation"):
             with st.spinner("Updating evaluation based on your answers..."):
                 output = run_reevaluation(
@@ -482,15 +504,72 @@ else:
                     idea["user_answers"],
                 )
                 decision, score = extract_decision_and_score(output)
-                update_idea(idea["id"], final_evaluation=output, final_score=score,
-                            decision=decision, status="completed")
+                first_round = {
+                    "round": 1,
+                    "answers": idea.get("user_answers", ""),
+                    "report": output,
+                }
+                rounds_history = [first_round]
+                update_idea(
+                    idea["id"],
+                    final_evaluation=output,
+                    final_score=score,
+                    decision=decision,
+                    status="in_progress",
+                    verification_rounds=_json.dumps(rounds_history, ensure_ascii=False),
+                )
             st.rerun()
         else:
             st.markdown(idea["final_evaluation"])
             st.divider()
-            if st.button("➡️ View Full Final Report", type="primary"):
-                st.session_state.stage = "done"
-                st.rerun()
+            st.subheader("What would you like to do next?")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Run another verification round**")
+                new_answers = st.text_area(
+                    f"Your answers for Round {current_round}",
+                    height=150,
+                    key=f"new_answers_round_{current_round}",
+                )
+                if st.button(
+                    f"🔄 Run Round {current_round}",
+                    type="primary",
+                    disabled=not new_answers.strip(),
+                ):
+                    with st.spinner(f"Running verification round {current_round}..."):
+                        output = run_additional_round(
+                            initial_report=idea["initial_evaluation"],
+                            rounds_history=rounds_history,
+                            new_answers=new_answers,
+                            round_number=current_round,
+                        )
+                        decision, score = extract_decision_and_score(output)
+                        new_round = {
+                            "round": current_round,
+                            "answers": new_answers,
+                            "report": output,
+                        }
+                        rounds_history.append(new_round)
+                        update_idea(
+                            idea["id"],
+                            final_evaluation=output,
+                            final_score=score,
+                            decision=decision,
+                            status="in_progress",
+                            verification_rounds=_json.dumps(rounds_history, ensure_ascii=False),
+                        )
+                    st.rerun()
+
+            with col2:
+                st.markdown("**Finalize this idea**")
+                st.caption("Close verification and move to final report.")
+                if st.button("✅ Finalize & View Final Report", type="secondary"):
+                    idea = get_idea(st.session_state.idea_id)
+                    decision, score = extract_decision_and_score(idea["final_evaluation"])
+                    update_idea(idea["id"], status="completed", decision=decision, final_score=score)
+                    st.session_state.stage = "done"
+                    st.rerun()
 
     # ---------- Stage 7: Final Report ----------
     elif st.session_state.stage == "done":

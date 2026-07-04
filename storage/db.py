@@ -1,6 +1,6 @@
 """
-Unicorn Hunter - Storage layer (local SQLite).
-Single table that captures the full idea lifecycle from input to final decision.
+Unicorn Hunter - SQLite storage layer (local fallback).
+Single table capturing the full idea lifecycle from input to final decision.
 """
 
 import sqlite3
@@ -23,35 +23,28 @@ def init_db():
         CREATE TABLE IF NOT EXISTS ideas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at TEXT NOT NULL,
-
-            -- Input
             sector_or_idea TEXT NOT NULL,
             user_sources TEXT,
-
-            -- Agent 1: Discovery
             discovery_output TEXT,
             input_quality_signal TEXT,
-
-            -- Agent 2: Problem Framing
             problem_card TEXT,
-
-            -- Agent 3: Solution Generation
             solutions_output TEXT,
-
-            -- Agent 4: Evaluation (single cycle in v1)
             initial_evaluation TEXT,
             initial_score INTEGER,
             verification_questions TEXT,
             user_answers TEXT,
             final_evaluation TEXT,
             final_score INTEGER,
-
-            -- Decision
             decision TEXT,
-
+            verification_rounds TEXT,
             status TEXT DEFAULT 'in_progress'
         )
     """)
+    # Add verification_rounds column if it does not exist (for existing databases)
+    try:
+        conn.execute("ALTER TABLE ideas ADD COLUMN verification_rounds TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -69,7 +62,6 @@ def create_idea(sector_or_idea: str, user_sources: str = "") -> int:
 
 
 def update_idea(idea_id: int, **fields):
-    """Flexible update for any columns — pass field name as keyword argument."""
     if not fields:
         return
     conn = get_connection()
