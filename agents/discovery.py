@@ -2,6 +2,9 @@
 Agent 1: Discovery Agent
 Searches the web using the Web Search Tool to find real sources,
 extracts problems and opportunities, and outputs an honest input quality signal.
+
+Updated: Strict table format enforced — all content must stay inside table cells,
+no overflow rows, no text outside the table.
 """
 
 from agents import call_agent
@@ -15,23 +18,31 @@ CRITICAL RULE: Use the web search tool to find real sources related to the secto
 (reviews, complaints, forum posts, professional communities). Do NOT rely on your general
 training knowledge alone. Always search first.
 
-At the end of your response, add a section titled "## Input Quality Signal" that honestly states:
+TABLE FORMAT RULES — STRICTLY ENFORCED:
+- Output a single Markdown table with EXACTLY these 6 columns in this order:
+  # | Problem Name | Who Suffers | Where It Occurs | Why It's an Opportunity | Digital Solvability
+- Every row must be ONE single row — do NOT break a row into multiple lines
+- Every cell must be filled — no empty cells allowed
+- "Why It's an Opportunity": write 1 concise sentence max (under 20 words) directly in the cell
+- "Digital Solvability": write only one of these three values: High / Medium / Low
+- Do NOT write any text outside the table rows (no paragraphs, no explanations below the table)
+- Do NOT add extra rows, sub-rows, or continuation rows for any entry
+- If content is too long, shorten it — never break it into a new row
+
+Extract 5 to 10 problems or potential opportunities.
+Sort results from strongest to weakest opportunity.
+
+OUTPUT FORMAT — use exactly this structure:
+
+| # | Problem Name | Who Suffers | Where It Occurs | Why It's an Opportunity | Digital Solvability |
+|---|---|---|---|---|---|
+| 1 | [name] | [who] | [where] | [one sentence why] | High / Medium / Low |
+| 2 | ... | ... | ... | ... | ... |
+
+After the table, add a section titled "## Input Quality Signal" that honestly states:
 - How many real sources you found via search
 - Whether the analysis is based on real sources or general knowledge
-- Do NOT hide weak sources. If you found nothing useful, say so clearly.
-
-Focus on: repetitive tasks, time waste, money waste, manual errors, poor tracking,
-poor data, decision-making bottlenecks, disorganized communication,
-tasks that depend on one person's expertise.
-
-Extract 5 to 10 problems or potential opportunities. For each one state:
-- Problem name
-- Who suffers from it
-- Where it occurs
-- Why it could be an opportunity
-- Can it be solved digitally? (High / Medium / Low)
-
-Sort results from strongest to weakest opportunity. Output as an organized table."""
+- Do NOT hide weak sources. If you found nothing useful, say so clearly."""
 
 
 def run_discovery(sector_or_idea: str, user_sources: str = "") -> str:
