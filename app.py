@@ -380,14 +380,64 @@ else:
                 update_idea(idea["id"], discovery_output=output)
             st.rerun()
         else:
-            st.markdown(idea["discovery_output"])
-            st.divider()
-            st.info("Copy the problem you want to continue with into the field below.")
-            selected_problem = st.text_area("Selected problem to investigate", height=120)
-            if st.button("➡️ Continue to Problem Framing", disabled=not selected_problem.strip()):
-                st.session_state.selected_problem = selected_problem
-                st.session_state.stage = "problem"
-                st.rerun()
+            # Parse cards from discovery output
+            raw = idea["discovery_output"]
+
+            # Split into individual cards by ### delimiter
+            card_blocks = re.split(r'(?=###\s+\d+\.)', raw)
+            cards = []
+            footer = ""
+            for block in card_blocks:
+                block = block.strip()
+                if not block:
+                    continue
+                if block.startswith("###"):
+                    # Extract card title for button label
+                    first_line = block.split("\n")[0]
+                    title = re.sub(r"^###\s+\d+\.\s*", "", first_line).strip()
+                    cards.append({"title": title, "content": block})
+                elif block.startswith("## Input Quality Signal"):
+                    footer = block
+
+            if cards:
+                st.info("Select the problem you want to investigate by clicking on a card.")
+                selected = st.session_state.get("selected_card_content", "")
+
+                for i, card in enumerate(cards):
+                    is_selected = selected == card["content"]
+                    with st.container():
+                        col1, col2 = st.columns([5, 1])
+                        with col1:
+                            st.markdown(card["content"])
+                        with col2:
+                            label = "✅ Selected" if is_selected else "Select"
+                            btn_type = "primary" if is_selected else "secondary"
+                            if st.button(label, key=f"card_{i}", type=btn_type):
+                                st.session_state.selected_card_content = card["content"]
+                                st.rerun()
+                        st.divider()
+
+                if footer:
+                    with st.expander("📊 Input Quality Signal", expanded=False):
+                        st.markdown(footer)
+
+                selected_content = st.session_state.get("selected_card_content", "")
+                if st.button("➡️ Continue to Problem Framing", type="primary",
+                             disabled=not selected_content):
+                    st.session_state.selected_problem = selected_content
+                    st.session_state.stage = "problem"
+                    st.rerun()
+            else:
+                # Fallback: show raw output with manual text input
+                st.markdown(raw)
+                st.divider()
+                st.info("Copy the problem you want to continue with into the field below.")
+                selected_problem = st.text_area("Selected problem to investigate", height=120)
+                if st.button("➡️ Continue to Problem Framing",
+                             disabled=not selected_problem.strip()):
+                    st.session_state.selected_problem = selected_problem
+                    st.session_state.stage = "problem"
+                    st.rerun()
 
     # ---------- Stage 3: Problem Framing ----------
     elif st.session_state.stage == "problem":
