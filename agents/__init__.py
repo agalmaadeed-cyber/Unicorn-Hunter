@@ -66,6 +66,16 @@ def call_agent(system_prompt: str, user_message: str, use_web_search: bool = Fal
     Unified call function for all agents.
     Injects language instruction into every system prompt automatically.
     Web search enabled only for Discovery Agent.
+
+    a.5 fix (cross-project evaluation, 2026-07-23): if the model's response
+    is cut off by max_tokens, the caller used to get a silently-truncated
+    string with no signal at all (e.g. the Solutions table losing its last
+    row with no visible sign anything was wrong). Now any max_tokens cutoff
+    is surfaced as a visible trailing warning appended to the returned text
+    itself, since every call site already renders this text directly via
+    st.markdown() and embeds it in the exported Markdown report -- no new
+    UI plumbing needed, the warning just becomes part of what's already
+    shown.
     """
     client = get_client()
 
@@ -88,4 +98,13 @@ def call_agent(system_prompt: str, user_message: str, use_web_search: bool = Fal
     response = client.messages.create(**kwargs)
 
     text_parts = [block.text for block in response.content if hasattr(block, "text")]
-    return "\n".join(text_parts).strip()
+    result = "\n".join(text_parts).strip()
+
+    if response.stop_reason == "max_tokens":
+        result += (
+            "\n\n---\n"
+            "**Technical note: the model's response was cut off by the max_tokens limit "
+            "-- content near the end of this section may be missing.**"
+        )
+
+    return result

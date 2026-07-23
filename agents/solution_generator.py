@@ -45,4 +45,14 @@ def run_solution_generation(problem_card: str) -> str:
     user_message = f"""Problem Card:
 {problem_card}
 """
-    return call_agent(SYSTEM_PROMPT, user_message)
+    # a.5 fix (cross-project evaluation, 2026-07-23): this table has grown to
+    # 13 columns x 5-7 rows (AI Role / AI Depth were added after the
+    # original 4000-token default was set -- see the "Updated" note at the
+    # top of this file) -- large enough that the last row was being
+    # silently cut off by the shared call_agent() default of max_tokens=4000.
+    # Raised to 8000 here, specific to this agent's larger structured
+    # output; other agents keep the 4000 default unchanged. If 8000 is ever
+    # still not enough, the visible truncation warning added to
+    # call_agent() (agents/__init__.py) surfaces it instead of silently
+    # dropping data.
+    return call_agent(SYSTEM_PROMPT, user_message, max_tokens=8000)
