@@ -426,6 +426,11 @@ else:
             with st.spinner("Searching the web and extracting opportunities..."):
                 output = run_discovery(idea["sector_or_idea"], idea["user_sources"] or "")
                 update_idea(idea["id"], discovery_output=output)
+                # a.10 fix (cross-project evaluation, 2026-07-24): an active,
+                # ephemeral notification for this step's completion -- the
+                # existing pattern was a silent st.rerun() with no signal
+                # beyond the page re-rendering.
+                st.toast("Discovery complete.", icon="✅")
             st.rerun()
         else:
             # Parse cards from discovery output
@@ -500,6 +505,8 @@ else:
                     st.session_state.selected_problem, idea["sector_or_idea"]
                 )
                 update_idea(idea["id"], problem_card=output)
+                # a.10 fix (cross-project evaluation, 2026-07-24): see Discovery above.
+                st.toast("Problem framing complete.", icon="✅")
             st.rerun()
 
         idea = get_idea(st.session_state.idea_id)
@@ -521,6 +528,8 @@ else:
             with st.spinner("Generating diverse solutions..."):
                 output = run_solution_generation(idea["problem_card"])
                 update_idea(idea["id"], solutions_output=output)
+                # a.10 fix (cross-project evaluation, 2026-07-24): see Discovery above.
+                st.toast("Solutions generated.", icon="✅")
             st.rerun()
         else:
             st.markdown(idea["solutions_output"])
@@ -541,6 +550,8 @@ else:
                 output = run_initial_evaluation(idea["problem_card"], idea["solutions_output"])
                 decision, score = extract_decision_and_score(output)
                 update_idea(idea["id"], initial_evaluation=output, initial_score=score)
+                # a.10 fix (cross-project evaluation, 2026-07-24): see Discovery above.
+                st.toast("Initial evaluation complete.", icon="✅")
             st.rerun()
         else:
             st.warning("⚠️ This is an analytical report based on model inference — NOT actual market validation.")
@@ -581,6 +592,10 @@ else:
                     decision, score = extract_decision_and_score(idea["initial_evaluation"])
                     update_idea(idea["id"], status="completed", decision=decision, final_score=score)
                     st.session_state.stage = "done"
+                    # a.10 fix (cross-project evaluation, 2026-07-24): the
+                    # whole-idea completion, founder-confirmed as its own
+                    # distinct notification from each individual agent step.
+                    st.toast("Idea evaluation complete.", icon="🎉")
                     st.rerun()
 
     # ---------- Stage 6: Re-evaluation (multi-round) ----------
@@ -634,6 +649,8 @@ else:
                     status="in_progress",
                     verification_rounds=_json.dumps(rounds_history, ensure_ascii=False),
                 )
+                # a.10 fix (cross-project evaluation, 2026-07-24): see Discovery above.
+                st.toast("Re-evaluation complete.", icon="✅")
             st.rerun()
         else:
             st.markdown(idea["final_evaluation"])
@@ -697,6 +714,8 @@ else:
                             status="in_progress",
                             verification_rounds=_json.dumps(rounds_history, ensure_ascii=False),
                         )
+                        # a.10 fix (cross-project evaluation, 2026-07-24): see Discovery above.
+                        st.toast(f"Verification round {current_round} complete.", icon="✅")
                     st.rerun()
 
             with col2:
@@ -707,6 +726,10 @@ else:
                     decision, score = extract_decision_and_score(idea["final_evaluation"])
                     update_idea(idea["id"], status="completed", decision=decision, final_score=score)
                     st.session_state.stage = "done"
+                    # a.10 fix (cross-project evaluation, 2026-07-24): see
+                    # the Skip Verification note above -- same whole-idea
+                    # completion signal, reached via the other path.
+                    st.toast("Idea evaluation complete.", icon="🎉")
                     st.rerun()
 
     # ---------- Stage 7: Final Report ----------
