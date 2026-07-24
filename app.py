@@ -118,6 +118,54 @@ def extract_decision_and_score(report_text: str) -> tuple:
     return decision, score
 
 
+def _extract_verification_questions(report_text: str) -> list:
+    """
+    Deterministically parse the numbered verification questions out of an
+    evaluation report's own markdown structure (a.9 fix, cross-project
+    evaluation, 2026-07-22/24). Both INITIAL_SYSTEM_PROMPT and
+    ADDITIONAL_ROUND_SYSTEM_PROMPT instruct the model to emit a
+    "## Field Verification Questions" (or "## New Field Verification
+    Questions (Round N)") section with a plain numbered list ("1. 2. 3.").
+    Same class of deterministic report-parsing already trusted in this repo
+    (see extract_decision_and_score() above), scoped strictly to the
+    matched section's own text so it can never accidentally pick up an
+    unrelated numbered list elsewhere in the report.
+
+    Returns a list of question strings, in order. Returns an empty list if
+    the section or its numbered items can't be found -- callers MUST treat
+    an empty list as "fall back to a single combined answer box", not as
+    an error; a model that ever deviates from the documented format
+    degrades safely to the old behavior instead of crashing or silently
+    mis-parsing.
+    """
+    section_match = re.search(
+        r"##\s*(?:New\s+)?Field Verification Questions[^\n]*\n(.*?)(?=\n##|\Z)",
+        report_text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not section_match:
+        return []
+
+    section_text = section_match.group(1)
+    questions = re.findall(r"^\s*\d+\.\s*(.+)$", section_text, re.MULTILINE)
+    return [q.strip() for q in questions if q.strip()]
+
+
+def _format_verification_answers(individual_answers: list) -> str:
+    """
+    Recombine per-question answer boxes back into a single string for the
+    agent-facing user_answers/new_answers payload (a.9 fix). Always
+    includes every slot by position, labeled "Q1 answer:", "Q2 answer:",
+    etc. -- an unanswered question is written out as "(not answered)"
+    rather than silently dropped, so the numbering can never drift and
+    misalign an answer with the wrong question if the founder skips one.
+    """
+    return "\n".join(
+        f"Q{i} answer: {a.strip() if a.strip() else '(not answered)'}"
+        for i, a in enumerate(individual_answers, start=1)
+    )
+
+
 def show_previous_stages(idea: dict, current_stage: str):
     """
     Display all completed previous stages as collapsed expanders.
@@ -499,13 +547,31 @@ else:
             st.markdown(idea["initial_evaluation"])
             st.divider()
             st.subheader("Field Verification Answers")
-            st.caption("Go verify in the field, then enter what you found.")
-            answers = st.text_area("Your answers", height=150, key="user_answers_input")
+            # a.9 fix (cross-project evaluation, 2026-07-22/24): a separate
+            # answer box per question, deterministically parsed out of the
+            # report itself, instead of one combined free-text box for all
+            # 3 questions. Falls back to the original single combined box
+            # if the report ever deviates from the documented format.
+            verification_questions = _extract_verification_questions(idea["initial_evaluation"])
+            if verification_questions:
+                st.caption("Go verify in the field, then enter what you found for each question.")
+                individual_answers = []
+                for q_i, q_text in enumerate(verification_questions, start=1):
+                    st.markdown(f"**Q{q_i}.** {q_text}")
+                    individual_answers.append(
+                        st.text_area(f"Your answer to Q{q_i}", height=80, key=f"user_answer_q{q_i}")
+                    )
+                answers = _format_verification_answers(individual_answers)
+                has_any_answer = any(a.strip() for a in individual_answers)
+            else:
+                st.caption("Go verify in the field, then enter what you found.")
+                answers = st.text_area("Your answers", height=150, key="user_answers_input")
+                has_any_answer = bool(answers.strip())
 
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("✅ Submit Answers & Re-evaluate", type="primary",
-                             disabled=not answers.strip()):
+                             disabled=not has_any_answer):
                     update_idea(idea["id"], user_answers=answers)
                     st.session_state.stage = "reeval"
                     st.rerun()
@@ -577,15 +643,37 @@ else:
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("**Run another verification round**")
-                new_answers = st.text_area(
-                    f"Your answers for Round {current_round}",
-                    height=150,
-                    key=f"new_answers_round_{current_round}",
-                )
+                # a.9 fix (cross-project evaluation, 2026-07-22/24): same
+                # per-question split as Step 5's initial verification,
+                # parsed from this round's own report (which ends with the
+                # NEXT round's "## New Field Verification Questions"
+                # section per ADDITIONAL_ROUND_SYSTEM_PROMPT). Falls back
+                # to the original single combined box if unparseable.
+                round_questions = _extract_verification_questions(idea["final_evaluation"])
+                if round_questions:
+                    individual_round_answers = []
+                    for q_i, q_text in enumerate(round_questions, start=1):
+                        st.markdown(f"**Q{q_i}.** {q_text}")
+                        individual_round_answers.append(
+                            st.text_area(
+                                f"Your answer to Q{q_i}",
+                                height=80,
+                                key=f"new_answer_round_{current_round}_q{q_i}",
+                            )
+                        )
+                    new_answers = _format_verification_answers(individual_round_answers)
+                    has_any_round_answer = any(a.strip() for a in individual_round_answers)
+                else:
+                    new_answers = st.text_area(
+                        f"Your answers for Round {current_round}",
+                        height=150,
+                        key=f"new_answers_round_{current_round}",
+                    )
+                    has_any_round_answer = bool(new_answers.strip())
                 if st.button(
                     f"🔄 Run Round {current_round}",
                     type="primary",
-                    disabled=not new_answers.strip(),
+                    disabled=not has_any_round_answer,
                 ):
                     with st.spinner(f"Running verification round {current_round}..."):
                         output = run_additional_round(
